@@ -314,7 +314,16 @@ func (x *EtcdStorage) Watch(ctx context.Context, lockId string) (<-chan *storage
 					if err := json.Unmarshal([]byte(value.Json), info); err != nil {
 						continue
 					}
-					etcdBeforeNotify(ctx)
+					notifyDone := make(chan struct{})
+					go func() {
+						defer close(notifyDone)
+						etcdBeforeNotify(ctx)
+					}()
+					select {
+					case <-ctx.Done():
+						return
+					case <-notifyDone:
+					}
 					select {
 					case <-ctx.Done():
 						return
