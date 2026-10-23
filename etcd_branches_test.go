@@ -322,6 +322,8 @@ func TestEtcdStorage_Watch(t *testing.T) {
 		t.Fatal("watch did not close")
 	}
 
+	// 场景A：等 beforeNotify 阻塞在通知 goroutine 内（第一个 select 等待 notifyDone），
+	// 直接取消 ctx，命中第一个 select 的 ctx.Done() 分支。
 	blocked := make(chan clientv3.WatchResponse)
 	canceled, stop := context.WithCancel(context.Background())
 	stop()
@@ -335,12 +337,46 @@ func TestEtcdStorage_Watch(t *testing.T) {
 		t.Fatal("canceled watch did not stop")
 	}
 
+	// 场景B：先让 beforeNotify 阻塞（第一个 select 等待 notifyDone），随后取消 ctx，
+	// 命中第一个 select 的 ctx.Done() 分支。
+	sendCtxA, sendStopA := context.WithCancel(context.Background())
+	defer sendStopA()
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	orig := etcdBeforeNotify
+	defer func() { etcdBeforeNotify = orig }()
+	etcdBeforeNotify = func(context.Context) {
+		select {
+		case <-enteredA:
+		default:
+			close(enteredA)
+		}
+		<-releaseA
+	}
+	watcherA := &blockingWatch{payload: encodeEtcd("1", lockJSON("blockedA"))}
+	sendingA := newTestEtcd(t, &fakeKV{}, watcherA)
+	out, err = sendingA.Watch(sendCtxA, "id")
+	assert.NoError(t, err)
+	select {
+	case <-enteredA:
+	case <-time.After(time.Second):
+		t.Fatal("send did not block")
+	}
+	sendStopA()
+	close(releaseA)
+	select {
+	case _, ok := <-out:
+		assert.False(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("blocked send did not stop")
+	}
+
+	// 场景C：先放行 beforeNotify，让 watch goroutine 进入第二个 select 并阻塞在发送上，
+	// 再取消 ctx，确定性命中第二个 select 的 ctx.Done() 分支。
 	sendCtx, sendStop := context.WithCancel(context.Background())
 	defer sendStop()
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	orig := etcdBeforeNotify
-	defer func() { etcdBeforeNotify = orig }()
 	etcdBeforeNotify = func(context.Context) {
 		select {
 		case <-entered:
@@ -358,8 +394,10 @@ func TestEtcdStorage_Watch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("send did not block")
 	}
-	sendStop()
+	// 先放行 beforeNotify，等待 goroutine 推进到第二个 select 的发送阻塞点。
 	close(release)
+	time.Sleep(100 * time.Millisecond)
+	sendStop()
 	select {
 	case _, ok := <-out:
 		assert.False(t, ok)
