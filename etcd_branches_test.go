@@ -39,6 +39,9 @@ func (k *fakeKV) Put(context.Context, string, string, ...clientv3.OpOption) (*cl
 func (k *fakeKV) Get(context.Context, string, ...clientv3.OpOption) (*clientv3.GetResponse, error) {
 	return k.getResp, k.getErr
 }
+func (k *fakeKV) GetStream(context.Context, string, ...clientv3.OpOption) (clientv3.GetStreamChan, error) {
+	return nil, errors.New("unused")
+}
 func (k *fakeKV) Delete(context.Context, string, ...clientv3.OpOption) (*clientv3.DeleteResponse, error) {
 	return nil, errors.New("unused")
 }
